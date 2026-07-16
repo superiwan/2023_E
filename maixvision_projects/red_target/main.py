@@ -34,6 +34,14 @@ def _scale_corners(corners, source_width, source_height, target_width, target_he
     return [(round(x * scale_x), round(y * scale_y)) for x, y in corners]
 
 
+def _frame_due(frame_index, interval):
+    return frame_index % interval == 0
+
+
+def _rectangle_edges(corners):
+    return [(corners[index], corners[(index + 1) % 4]) for index in range(4)]
+
+
 def _expanded_roi(corners):
     margin = config.RECT_ROI_MARGIN
     x0 = max(0, min(point[0] for point in corners) - margin)
@@ -50,6 +58,12 @@ def _draw_buttons(frame, image):
         x = index * width
         frame.draw_rect(x, top, width, 60, image.COLOR_WHITE, 2)
         frame.draw_string(x + 8, top + 20, label, image.COLOR_WHITE)
+
+
+def _draw_rectangles(frame, rectangles, color):
+    for corners in rectangles:
+        for start, end in _rectangle_edges(corners):
+            frame.draw_line(start[0], start[1], end[0], end[1], color, 2)
 
 
 def run():
@@ -72,8 +86,11 @@ def run():
     rect_lock = _new_rectangle_lock()
     laser_roi = None
     previous_laser = None
+    rectangle_candidates = []
+    locked_corners = None
     last_frame_ms = time.ticks_ms()
     fps = 0.0
+    frame_index = 0
 
     while not app.need_exit():
         frame = cam.read()
@@ -89,6 +106,8 @@ def run():
                     machine.handle_command(message_type)
                     if message_type == MessageType.REACQUIRE:
                         rect_lock, laser_roi, previous_laser = _reset_acquisition()
+                        rectangle_candidates = []
+                        locked_corners = None
 
         x, y, pressed = touch.read()
         command = controls.update(x, y, pressed, now_ms)
@@ -97,10 +116,12 @@ def run():
             serial.write(encode_frame(command))
             if command == MessageType.REACQUIRE:
                 rect_lock, laser_roi, previous_laser = _reset_acquisition()
+                rectangle_candidates = []
+                locked_corners = None
 
-        if machine.state == RunState.ACQUIRE:
+        if machine.state == RunState.ACQUIRE and _frame_due(frame_index, config.RECT_DETECT_INTERVAL_FRAMES):
             detection_frame = frame.resize(config.RECT_DETECTION_WIDTH, config.RECT_DETECTION_HEIGHT)
-            rectangles = [
+            rectangle_candidates = [
                 _scale_corners(
                     item.corners(),
                     config.RECT_DETECTION_WIDTH,
@@ -111,13 +132,14 @@ def run():
                 for item in detection_frame.find_rects(threshold=config.RECT_THRESHOLD)
             ]
             del detection_frame
-            lock_result = rect_lock.observe(rectangles)
+            lock_result = rect_lock.observe(rectangle_candidates)
             if lock_result is not None:
+                locked_corners = lock_result.corners
                 machine.set_trajectory(
-                    generate_waypoints(lock_result.corners, config.EDGE_SEGMENTS),
+                    generate_waypoints(locked_corners, config.EDGE_SEGMENTS),
                     lock_result.confidence.value,
                 )
-                laser_roi = _expanded_roi(lock_result.corners)
+                laser_roi = _expanded_roi(locked_corners)
 
         laser = None
         if laser_roi is not None:
@@ -141,16 +163,32 @@ def run():
         for message_type, index, data0, data1 in machine.update(now_ms, laser):
             serial.write(encode_frame(message_type, index, data0, data1))
 
-        if machine.waypoints:
-            for index, point in enumerate(machine.waypoints):
-                active = index == machine.current_index and machine.state != RunState.DONE
-                frame.draw_circle(point[0], point[1], 3, image.COLOR_YELLOW if active else image.COLOR_BLUE, -1)
-        if laser is not None:
-            frame.draw_circle(laser[0], laser[1], 5, image.COLOR_RED, 2)
-        frame.draw_string(2, 2, "{} RECT {}".format(machine.state.value, machine.rect_confidence or "-"), image.COLOR_GREEN)
-        frame.draw_string(2, 20, "FPS {:.1f}".format(fps), image.COLOR_GREEN)
-        _draw_buttons(frame, image)
-        disp.show(frame)
+        if _frame_due(frame_index, config.DISPLAY_INTERVAL_FRAMES):
+            if machine.state == RunState.ACQUIRE:
+                _draw_rectangles(frame, rectangle_candidates, image.COLOR_YELLOW)
+            elif locked_corners is not None:
+                _draw_rectangles(frame, [locked_corners], image.COLOR_GREEN)
+            if machine.waypoints:
+                for index, point in enumerate(machine.waypoints):
+                    active = index == machine.current_index and machine.state != RunState.DONE
+                    frame.draw_circle(point[0], point[1], 3, image.COLOR_YELLOW if active else image.COLOR_BLUE, -1)
+            if laser is not None:
+                frame.draw_circle(laser[0], laser[1], 5, image.COLOR_RED, 2)
+            frame.draw_string(
+                2,
+                2,
+                "{} RECT {} CAND {}".format(
+                    machine.state.value,
+                    machine.rect_confidence or "-",
+                    len(rectangle_candidates),
+                ),
+                image.COLOR_GREEN,
+            )
+            frame.draw_string(2, 20, "FPS {:.1f}".format(fps), image.COLOR_GREEN)
+            _draw_buttons(frame, image)
+            disp.show(frame)
+
+        frame_index += 1
 
 
 if __name__ == "__main__":
