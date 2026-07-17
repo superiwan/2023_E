@@ -76,6 +76,9 @@ class RectangleLock:
             valid.append((area, ordered))
         return valid
 
+    def filtered_candidates(self, rectangles):
+        return [corners for _, corners in self._valid_candidates(rectangles)]
+
     def _best_pair(self, candidates):
         pairs = []
         for outer_area, outer in candidates:

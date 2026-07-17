@@ -42,6 +42,13 @@ def _frame_due(frame_index, interval):
     return frame_index % interval == 0
 
 
+def _update_visible_candidates(previous, current, missed_detections):
+    if current:
+        return current, 0
+    missed_detections += 1
+    return (previous if missed_detections == 1 else []), missed_detections
+
+
 def _rectangle_edges(corners):
     return [(corners[index], corners[(index + 1) % 4]) for index in range(4)]
 
@@ -147,14 +154,16 @@ def run():
     laser_roi = None
     previous_laser = None
     rectangle_candidates = []
+    rectangle_candidate_misses = 0
     last_frame_ms = time.ticks_ms()
     fps = 0.0
     frame_index = 0
 
     def activate_mode():
-        nonlocal rect_lock, laser_roi, previous_laser, rectangle_candidates
+        nonlocal rect_lock, laser_roi, previous_laser, rectangle_candidates, rectangle_candidate_misses
         rect_lock, laser_roi, previous_laser = _reset_acquisition(machine.mode)
         rectangle_candidates = []
+        rectangle_candidate_misses = 0
         corners = _restore_cached_trajectory(machine, geometry_cache)
         if corners is not None:
             laser_roi = _laser_roi(corners, machine.mode)
@@ -194,7 +203,7 @@ def run():
 
         if machine.state == RunState.ACQUIRE and _frame_due(frame_index, config.RECT_DETECT_INTERVAL_FRAMES):
             detection_frame = frame.resize(config.RECT_DETECTION_WIDTH, config.RECT_DETECTION_HEIGHT)
-            rectangle_candidates = [
+            detected_rectangles = [
                 _scale_corners(
                     item.corners(),
                     config.RECT_DETECTION_WIDTH,
@@ -205,7 +214,12 @@ def run():
                 for item in detection_frame.find_rects(threshold=config.RECT_THRESHOLD)
             ]
             del detection_frame
-            lock_result = rect_lock.observe(rectangle_candidates)
+            rectangle_candidates, rectangle_candidate_misses = _update_visible_candidates(
+                rectangle_candidates,
+                rect_lock.filtered_candidates(detected_rectangles),
+                rectangle_candidate_misses,
+            )
+            lock_result = rect_lock.observe(detected_rectangles)
             if lock_result is not None:
                 geometry_cache.store(machine.mode, lock_result.corners, lock_result.confidence.value)
                 corners = _restore_cached_trajectory(machine, geometry_cache)
