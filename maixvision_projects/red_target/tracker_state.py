@@ -13,7 +13,7 @@ class RunState(Enum):
     DONE = "DONE"
 
 
-class TargetTask(IntEnum):
+class RedMode(IntEnum):
     ORIGIN = 0
     SCREEN_BORDER = 1
     A4_BORDER = 2
@@ -24,7 +24,7 @@ class RedTargetStateMachine:
         self.arrive_radius_squared = arrive_radius * arrive_radius
         self.required_stable_frames = stable_frames
         self.waypoint_interval_ms = waypoint_interval_ms
-        self.task = TargetTask.A4_BORDER
+        self.mode = RedMode.A4_BORDER
         self.state = RunState.ACQUIRE
         self.waypoints = []
         self.rect_confidence = None
@@ -63,9 +63,9 @@ class RedTargetStateMachine:
 
     def handle_command(self, command, index=0):
         command = MessageType(command)
-        if command == MessageType.SELECT_TASK:
+        if command == MessageType.SELECT_MODE:
             try:
-                self.task = TargetTask(index)
+                self.mode = RedMode(index)
             except ValueError:
                 return False
             self._reset_acquisition()
