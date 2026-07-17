@@ -1,6 +1,7 @@
 """MaixVision 入口：红色运动目标系统。"""
 
 import config
+from geometry_cache import GeometryCache
 from rectangle_lock import RectangleLock
 from touch_controls import TouchControls
 from tracker_state import RedMode, RedTargetStateMachine, RunState
@@ -60,6 +61,19 @@ def _laser_roi(corners, mode):
     return _expanded_roi(corners)
 
 
+def _restore_cached_trajectory(machine, geometry_cache):
+    cached = geometry_cache.get(machine.mode)
+    if cached is None:
+        return None
+    corners, confidence = cached
+    if machine.mode == RedMode.ORIGIN:
+        waypoints = [rectangle_center(corners)]
+    else:
+        waypoints = generate_waypoints(corners, config.EDGE_SEGMENTS)
+    machine.set_trajectory(waypoints, confidence)
+    return corners
+
+
 def _draw_buttons(frame, image, active_mode):
     mode_width = config.FRAME_WIDTH // 3
     for index, (label, mode) in enumerate(
@@ -91,6 +105,19 @@ def _draw_rectangles(frame, rectangles, color):
             frame.draw_line(start[0], start[1], end[0], end[1], color, 2)
 
 
+def _draw_cached_geometry(frame, geometry_cache, image):
+    screen = geometry_cache.get(RedMode.SCREEN_BORDER)
+    if screen is not None:
+        screen_corners, _ = screen
+        _draw_rectangles(frame, [screen_corners], image.COLOR_GREEN)
+        _draw_center_marker(frame, rectangle_center(screen_corners), image.COLOR_WHITE)
+
+    a4 = geometry_cache.get(RedMode.A4_BORDER)
+    if a4 is not None:
+        a4_corners, _ = a4
+        _draw_rectangles(frame, [a4_corners], image.COLOR_BLUE)
+
+
 def run():
     from maix import app, camera, display, err, image, pinmap, time, touchscreen, uart
 
@@ -115,20 +142,30 @@ def run():
     )
     parser = FrameParser()
     machine = RedTargetStateMachine(config.ARRIVE_RADIUS, config.STABLE_FRAMES, config.WAYPOINT_SEND_INTERVAL_MS)
+    geometry_cache = GeometryCache()
     rect_lock = _new_rectangle_lock(machine.mode)
     laser_roi = None
     previous_laser = None
     rectangle_candidates = []
-    locked_corners = None
     last_frame_ms = time.ticks_ms()
     fps = 0.0
     frame_index = 0
 
-    def reset_acquisition_context():
-        nonlocal rect_lock, laser_roi, previous_laser, rectangle_candidates, locked_corners
+    def activate_mode():
+        nonlocal rect_lock, laser_roi, previous_laser, rectangle_candidates
         rect_lock, laser_roi, previous_laser = _reset_acquisition(machine.mode)
         rectangle_candidates = []
-        locked_corners = None
+        corners = _restore_cached_trajectory(machine, geometry_cache)
+        if corners is not None:
+            laser_roi = _laser_roi(corners, machine.mode)
+
+    def apply_control(command, index):
+        reset_required = machine.handle_command(command, index)
+        if not reset_required:
+            return
+        if command == MessageType.REACQUIRE:
+            geometry_cache.clear(machine.mode)
+        activate_mode()
 
     while not app.need_exit():
         frame = cam.read()
@@ -146,17 +183,14 @@ def run():
                     MessageType.REACQUIRE,
                     MessageType.SELECT_MODE,
                 ):
-                    if machine.handle_command(message_type, index):
-                        reset_acquisition_context()
+                    apply_control(message_type, index)
 
         x, y, pressed = touch.read()
         event = controls.update(x, y, pressed, now_ms)
         if event is not None:
             command, index = event
-            reset_required = machine.handle_command(command, index)
+            apply_control(command, index)
             serial.write(encode_frame(command, index))
-            if reset_required:
-                reset_acquisition_context()
 
         if machine.state == RunState.ACQUIRE and _frame_due(frame_index, config.RECT_DETECT_INTERVAL_FRAMES):
             detection_frame = frame.resize(config.RECT_DETECTION_WIDTH, config.RECT_DETECTION_HEIGHT)
@@ -173,16 +207,9 @@ def run():
             del detection_frame
             lock_result = rect_lock.observe(rectangle_candidates)
             if lock_result is not None:
-                locked_corners = lock_result.corners
-                if machine.mode == RedMode.ORIGIN:
-                    waypoints = [rectangle_center(locked_corners)]
-                else:
-                    waypoints = generate_waypoints(locked_corners, config.EDGE_SEGMENTS)
-                machine.set_trajectory(
-                    waypoints,
-                    lock_result.confidence.value,
-                )
-                laser_roi = _laser_roi(locked_corners, machine.mode)
+                geometry_cache.store(machine.mode, lock_result.corners, lock_result.confidence.value)
+                corners = _restore_cached_trajectory(machine, geometry_cache)
+                laser_roi = _laser_roi(corners, machine.mode)
 
         laser = None
         if laser_roi is not None:
@@ -209,10 +236,7 @@ def run():
         if _frame_due(frame_index, config.DISPLAY_INTERVAL_FRAMES):
             if machine.state == RunState.ACQUIRE:
                 _draw_rectangles(frame, rectangle_candidates, image.COLOR_YELLOW)
-            elif locked_corners is not None:
-                _draw_rectangles(frame, [locked_corners], image.COLOR_GREEN)
-            if locked_corners is not None and machine.mode in (RedMode.ORIGIN, RedMode.SCREEN_BORDER):
-                _draw_center_marker(frame, rectangle_center(locked_corners), image.COLOR_WHITE)
+            _draw_cached_geometry(frame, geometry_cache, image)
             if machine.waypoints:
                 for index, point in enumerate(machine.waypoints):
                     active = index == machine.current_index and machine.state != RunState.DONE
