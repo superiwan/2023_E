@@ -3,29 +3,32 @@
 import config
 from rectangle_lock import RectangleLock
 from touch_controls import TouchControls
-from tracker_state import RedTargetStateMachine, RunState
-from trajectory import generate_waypoints
+from tracker_state import RedTargetStateMachine, RunState, TargetTask
+from trajectory import generate_waypoints, rectangle_center
 from shared.blob_tracking import choose_blob
 from shared.protocol import FrameParser, MessageType, encode_frame
 
 
-def _new_rectangle_lock():
+def _new_rectangle_lock(task=TargetTask.A4_BORDER):
+    screen_task = task in (TargetTask.ORIGIN, TargetTask.SCREEN_BORDER)
     return RectangleLock(
         config.FRAME_WIDTH,
         config.FRAME_HEIGHT,
         config.RECT_STABLE_FRAMES,
-        config.PAIR_MISS_FRAMES,
+        config.SCREEN_PAIR_MISS_FRAMES if screen_task else config.PAIR_MISS_FRAMES,
         config.MAX_CORNER_JITTER,
         config.MIN_RECT_AREA_RATIO,
         config.MAX_RECT_AREA_CHANGE_RATIO,
-        config.A4_ASPECT_RATIO,
-        config.A4_ASPECT_TOLERANCE,
+        config.SCREEN_ASPECT_RATIO if screen_task else config.A4_ASPECT_RATIO,
+        config.SCREEN_ASPECT_TOLERANCE if screen_task else config.A4_ASPECT_TOLERANCE,
         config.MIN_INNER_OUTER_AREA_RATIO,
+        not screen_task,
+        config.SCREEN_EXPECTED_AREA_RATIO if screen_task else None,
     )
 
 
-def _reset_acquisition():
-    return _new_rectangle_lock(), None, None
+def _reset_acquisition(task):
+    return _new_rectangle_lock(task), None, None
 
 
 def _scale_corners(corners, source_width, source_height, target_width, target_height):
@@ -49,6 +52,12 @@ def _expanded_roi(corners):
     x1 = min(config.FRAME_WIDTH, max(point[0] for point in corners) + margin + 1)
     y1 = min(config.FRAME_HEIGHT, max(point[1] for point in corners) + margin + 1)
     return [x0, y0, x1 - x0, y1 - y0]
+
+
+def _laser_roi(corners, task):
+    if task == TargetTask.ORIGIN:
+        return [0, 0, config.FRAME_WIDTH, config.FRAME_HEIGHT]
+    return _expanded_roi(corners)
 
 
 def _draw_buttons(frame, image):
@@ -83,7 +92,7 @@ def run():
     controls = TouchControls(config.FRAME_WIDTH, config.FRAME_HEIGHT, 60, config.TOUCH_DEBOUNCE_MS)
     parser = FrameParser()
     machine = RedTargetStateMachine(config.ARRIVE_RADIUS, config.STABLE_FRAMES, config.WAYPOINT_SEND_INTERVAL_MS)
-    rect_lock = _new_rectangle_lock()
+    rect_lock = _new_rectangle_lock(machine.task)
     laser_roi = None
     previous_laser = None
     rectangle_candidates = []
@@ -91,6 +100,12 @@ def run():
     last_frame_ms = time.ticks_ms()
     fps = 0.0
     frame_index = 0
+
+    def reset_acquisition_context():
+        nonlocal rect_lock, laser_roi, previous_laser, rectangle_candidates, locked_corners
+        rect_lock, laser_roi, previous_laser = _reset_acquisition(machine.task)
+        rectangle_candidates = []
+        locked_corners = None
 
     while not app.need_exit():
         frame = cam.read()
@@ -101,23 +116,23 @@ def run():
 
         incoming = serial.read()
         if incoming:
-            for message_type, _, _, _ in parser.feed(incoming):
-                if message_type in (MessageType.START_RESUME, MessageType.PAUSE, MessageType.REACQUIRE):
-                    machine.handle_command(message_type)
-                    if message_type == MessageType.REACQUIRE:
-                        rect_lock, laser_roi, previous_laser = _reset_acquisition()
-                        rectangle_candidates = []
-                        locked_corners = None
+            for message_type, index, _, _ in parser.feed(incoming):
+                if message_type in (
+                    MessageType.START_RESUME,
+                    MessageType.PAUSE,
+                    MessageType.REACQUIRE,
+                    MessageType.SELECT_TASK,
+                ):
+                    if machine.handle_command(message_type, index):
+                        reset_acquisition_context()
 
         x, y, pressed = touch.read()
         command = controls.update(x, y, pressed, now_ms)
         if command is not None:
-            machine.handle_command(command)
+            reset_required = machine.handle_command(command)
             serial.write(encode_frame(command))
-            if command == MessageType.REACQUIRE:
-                rect_lock, laser_roi, previous_laser = _reset_acquisition()
-                rectangle_candidates = []
-                locked_corners = None
+            if reset_required:
+                reset_acquisition_context()
 
         if machine.state == RunState.ACQUIRE and _frame_due(frame_index, config.RECT_DETECT_INTERVAL_FRAMES):
             detection_frame = frame.resize(config.RECT_DETECTION_WIDTH, config.RECT_DETECTION_HEIGHT)
@@ -135,11 +150,15 @@ def run():
             lock_result = rect_lock.observe(rectangle_candidates)
             if lock_result is not None:
                 locked_corners = lock_result.corners
+                if machine.task == TargetTask.ORIGIN:
+                    waypoints = [rectangle_center(locked_corners)]
+                else:
+                    waypoints = generate_waypoints(locked_corners, config.EDGE_SEGMENTS)
                 machine.set_trajectory(
-                    generate_waypoints(locked_corners, config.EDGE_SEGMENTS),
+                    waypoints,
                     lock_result.confidence.value,
                 )
-                laser_roi = _expanded_roi(locked_corners)
+                laser_roi = _laser_roi(locked_corners, machine.task)
 
         laser = None
         if laser_roi is not None:
@@ -178,7 +197,7 @@ def run():
                 2,
                 2,
                 "{} RECT {} CAND {}".format(
-                    machine.state.value,
+                    "{} {}".format(machine.task.name, machine.state.value),
                     machine.rect_confidence or "-",
                     len(rectangle_candidates),
                 ),

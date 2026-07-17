@@ -16,6 +16,7 @@ class MessageType(IntEnum):
     START_RESUME = 0x10
     PAUSE = 0x11
     REACQUIRE = 0x12
+    SELECT_TASK = 0x13
 
 
 def _encode_value(value, signed):
@@ -77,4 +78,3 @@ class FrameParser:
             frames.append((message_type, packet[3], data0, data1))
             del self._buffer[:FRAME_SIZE]
         return frames
-

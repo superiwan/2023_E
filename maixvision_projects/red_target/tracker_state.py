@@ -1,6 +1,6 @@
 """红色运动目标系统的航点与运行状态机。"""
 
-from enum import Enum
+from enum import Enum, IntEnum
 
 from shared.protocol import MessageType
 
@@ -13,17 +13,25 @@ class RunState(Enum):
     DONE = "DONE"
 
 
+class TargetTask(IntEnum):
+    ORIGIN = 0
+    SCREEN_BORDER = 1
+    A4_BORDER = 2
+
+
 class RedTargetStateMachine:
     def __init__(self, arrive_radius, stable_frames, waypoint_interval_ms):
         self.arrive_radius_squared = arrive_radius * arrive_radius
         self.required_stable_frames = stable_frames
         self.waypoint_interval_ms = waypoint_interval_ms
+        self.task = TargetTask.A4_BORDER
         self.state = RunState.ACQUIRE
         self.waypoints = []
         self.rect_confidence = None
         self.current_index = 0
         self.stable_count = 0
         self._last_waypoint_ms = None
+        self._start_requested = False
 
     @property
     def current_waypoint(self):
@@ -41,17 +49,32 @@ class RedTargetStateMachine:
         self.current_index = 0
         self.stable_count = 0
         self._last_waypoint_ms = None
-        self.state = RunState.WAIT_START
+        self.state = RunState.RUNNING if self._start_requested else RunState.WAIT_START
+        self._start_requested = False
 
-    def handle_command(self, command):
+    def _reset_acquisition(self):
+        self.state = RunState.ACQUIRE
+        self.waypoints = []
+        self.rect_confidence = None
+        self.current_index = 0
+        self.stable_count = 0
+        self._last_waypoint_ms = None
+        self._start_requested = False
+
+    def handle_command(self, command, index=0):
         command = MessageType(command)
-        if command == MessageType.REACQUIRE:
-            self.state = RunState.ACQUIRE
-            self.waypoints = []
-            self.rect_confidence = None
-            self.current_index = 0
-            self.stable_count = 0
-            self._last_waypoint_ms = None
+        if command == MessageType.SELECT_TASK:
+            try:
+                self.task = TargetTask(index)
+            except ValueError:
+                return False
+            self._reset_acquisition()
+            return True
+        elif command == MessageType.REACQUIRE:
+            self._reset_acquisition()
+            return True
+        elif command == MessageType.START_RESUME and self.state == RunState.ACQUIRE:
+            self._start_requested = True
         elif command == MessageType.START_RESUME and self.state in (RunState.WAIT_START, RunState.PAUSED):
             self.state = RunState.RUNNING
             self.stable_count = 0
@@ -59,6 +82,9 @@ class RedTargetStateMachine:
         elif command == MessageType.PAUSE and self.state == RunState.RUNNING:
             self.state = RunState.PAUSED
             self.stable_count = 0
+        elif command == MessageType.PAUSE and self.state == RunState.ACQUIRE:
+            self._start_requested = False
+        return False
 
     def update(self, now_ms, laser):
         if self.state != RunState.RUNNING:
@@ -93,4 +119,3 @@ class RedTargetStateMachine:
             self.state = RunState.DONE
             messages.append((MessageType.COMPLETE, 0xFF, 0, 0))
         return messages
-

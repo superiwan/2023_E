@@ -3,7 +3,7 @@
 import config
 from tracker_state import GreenTrackerState
 from shared.blob_tracking import choose_blob
-from shared.protocol import encode_frame
+from shared.protocol import FrameParser, MessageType, encode_frame
 
 
 def run():
@@ -24,6 +24,7 @@ def run():
         config.TRACK_STABLE_FRAMES,
         config.STATUS_INTERVAL_MS,
     )
+    parser = FrameParser()
     previous_red = None
     previous_green = None
     last_frame_ms = time.ticks_ms()
@@ -35,6 +36,12 @@ def run():
         frame_ms = max(1, now_ms - last_frame_ms)
         last_frame_ms = now_ms
         fps = fps * 0.8 + 200.0 / frame_ms
+
+        incoming = serial.read()
+        if incoming:
+            for message_type, _, _, _ in parser.feed(incoming):
+                if message_type in (MessageType.START_RESUME, MessageType.PAUSE):
+                    tracker.handle_command(message_type)
 
         blobs = frame.find_blobs(
             [config.RED_LAB_THRESHOLD, config.GREEN_LAB_THRESHOLD],
@@ -67,7 +74,9 @@ def run():
         for message_type, index, data0, data1 in tracker.update(now_ms, red, green):
             serial.write(encode_frame(message_type, index, data0, data1))
 
-        if red is None and green is None:
+        if tracker.paused:
+            state = "PAUSED"
+        elif red is None and green is None:
             state = "LOST BOTH"
         elif red is None:
             state = "LOST RED"

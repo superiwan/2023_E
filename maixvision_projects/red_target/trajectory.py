@@ -1,4 +1,4 @@
-"""A4 靶纸角点规范化与顺时针航点规划。"""
+"""矩形角点规范化、中心计算与顺时针航点规划。"""
 
 from math import atan2, hypot
 
@@ -52,6 +52,14 @@ def average_corners(samples):
     ]
 
 
+def rectangle_center(corners):
+    ordered = order_corners_clockwise(corners)
+    return (
+        round(sum(point[0] for point in ordered) / 4),
+        round(sum(point[1] for point in ordered) / 4),
+    )
+
+
 def generate_waypoints(corners, segments_per_edge=5):
     if segments_per_edge <= 0:
         raise ValueError("每边分段数必须大于零")
@@ -67,4 +75,3 @@ def generate_waypoints(corners, segments_per_edge=5):
                 )
             )
     return points
-

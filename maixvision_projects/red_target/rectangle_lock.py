@@ -44,6 +44,8 @@ class RectangleLock:
         aspect_ratio,
         aspect_tolerance,
         min_inner_outer_area_ratio=0.50,
+        prefer_pair=True,
+        target_area_ratio=None,
     ):
         self.frame_area = frame_width * frame_height
         self.stable_frames = stable_frames
@@ -54,6 +56,8 @@ class RectangleLock:
         self.expected_aspect_ratio = aspect_ratio
         self.aspect_tolerance = aspect_tolerance
         self.min_inner_outer_area_ratio = min_inner_outer_area_ratio
+        self.prefer_pair = prefer_pair
+        self.target_area_ratio = target_area_ratio
         self.pair_misses = 0
         self._samples = []
         self._sample_confidence = None
@@ -111,7 +115,7 @@ class RectangleLock:
             return self._locked
 
         candidates = self._valid_candidates(rectangles)
-        pair = self._best_pair(candidates)
+        pair = self._best_pair(candidates) if self.prefer_pair else None
         if pair is not None:
             self.pair_misses = 0
             return self._accumulate(pair, RectConfidence.HIGH)
@@ -121,6 +125,9 @@ class RectangleLock:
             self._samples = []
             self._sample_confidence = None
             return None
-        largest = max(candidates, key=lambda item: item[0])[1]
-        return self._accumulate(largest, RectConfidence.LOW)
-
+        if self.target_area_ratio is None:
+            selected = max(candidates, key=lambda item: item[0])[1]
+        else:
+            target_area = self.frame_area * self.target_area_ratio
+            selected = min(candidates, key=lambda item: abs(item[0] - target_area))[1]
+        return self._accumulate(selected, RectConfidence.LOW)

@@ -1,52 +1,96 @@
-# 2023 电赛 E 题 MaixCAM Pro 视觉程序
+# MaixCAM Pro - 2023 电赛 E 题视觉
 
-本仓库只包含可直接在 MaixVision 中运行的两个独立视觉项目：
+本项目提供两个相互独立的 MaixPy 应用：
 
-- `maixvision_projects/red_target`：红色运动目标系统。识别 A4 靶纸轨迹，生成 20 个顺时针航点，并输出航点和视觉误差帧。
-- `maixvision_projects/green_tracker`：绿色自动追踪系统。识别红、绿光斑并输出 `red - green` 视觉误差。
+- `main.py`：红色运动目标系统，支持原点复位、屏幕正方形巡边和 A4 靶纸巡边。
+- `green_main.py`：绿色自动追踪系统，独立识别红、绿光斑并输出追踪误差。
 
-两个项目分别部署到各自的 MaixCAM Pro 与控制系统，比赛运行时不相互通信。
+两套应用可以共享本仓库代码，但比赛运行时不得相互通信，必须分别部署到各自的 MaixCAM Pro 和控制系统。
 
-## 在 MaixVision 中运行
+## MaixVision 手动运行
 
-1. 选择“文件 → 打开文件夹/项目”。
-2. 红色系统打开 `maixvision_projects/red_target`；绿色系统打开 `maixvision_projects/green_tracker`。
-3. 点击“运行项目”，不要点击“运行当前文件”。运行项目会一起发送 `main.py` 和依赖模块。
+> 本项目包含多个 Python 模块。不要使用“运行当前文件”，该操作只发送当前 `.py`，会导致 `ModuleNotFoundError`。
 
-红色项目打开正确时，第一层应看到：
+1. 红色系统：选择“打开文件夹/项目”，打开 `maixvision_projects/red_target`。
+2. 绿色系统：在另一台 MaixCAM Pro 上打开 `maixvision_projects/green_tracker`。
+3. 红色项目打开正确时，左侧第一层会同时看到 `main.py`、`config.py`、`rectangle_lock.py`、`tracker_state.py`、`trajectory.py` 和 `shared/`，不会再有同名的内层 `red_target/`。
+4. 点击左下角“运行项目”，MaixVision 会把该视觉系统的入口和依赖一起发送到设备。
+5. 修改源码后先运行 `tools/build_maixvision_projects.ps1`，重新生成两个部署项目。
+6. 先断开电机或限制云台输出，确认误差符号和丢失制动，再进行 PID 联调。
 
-```text
-main.py
-config.py
-rectangle_lock.py
-touch_controls.py
-tracker_state.py
-trajectory.py
-shared/
-```
+红色主画面和 UART 坐标保持 `640×480`。由于 MaixCAM Pro 在 `640×480` 全帧执行 `find_rects()` 会耗尽快速帧缓冲，矩形检测内部使用 `320×240` 副本，再将角点映射回主坐标。
 
-红色系统使用 `640×480` 作为主画面、航点和 UART 坐标；为适配 MaixCAM Pro 的快速帧缓冲，矩形检测在 `320×240` 临时图像上运行，再将角点映射回主坐标。
+为减少矩形检测和屏幕刷新的阻塞，红色系统默认每 2 个视觉循环执行一次矩形检测、每 2 个视觉循环刷新一次屏幕。光斑检测、到达判定、触摸和 UART 状态机仍按每个视觉循环运行。屏幕上的 `FPS` 表示视觉主循环帧率，不是屏幕刷新率。
 
-为减小矩形检测和屏幕绘制对主循环的阻塞，红色系统默认每 2 个视觉循环执行一次矩形检测、每 2 个视觉循环刷新一次屏幕。光斑检测、到达判定、触摸和 UART 状态机仍在每个视觉循环执行。屏幕上的 `FPS` 表示视觉主循环帧率，不等同于屏幕刷新率。
+- 搜索时黄色四边形表示当前 `find_rects()` 候选，状态栏 `CAND n` 表示候选数量。
+- 锁定后绿色四边形表示最终轨迹矩形，蓝色圆点表示航点，黄色圆点表示当前航点。
+- `red_target/config.py` 中的 `RECT_DETECT_INTERVAL_FRAMES` 和 `DISPLAY_INTERVAL_FRAMES` 可以现场调整；设为 `1` 表示每帧执行，但帧率会降低。
 
-- 黄色四边形：当前矩形候选；状态栏 `CAND n`：候选数量。
-- 绿色四边形：已经锁定、用于生成航点的最终轨迹矩形。
-- `config.py` 中的 `RECT_DETECT_INTERVAL_FRAMES` 和 `DISPLAY_INTERVAL_FRAMES` 可现场调整；设为 `1` 即每帧执行，代价是帧率下降。
+程序已在 MaixCAM Pro 上完成摄像头、显示、触摸、UART 和持续视觉循环验证。颜色阈值、实际 FPS、厘米误差和 PID 极性仍需结合比赛现场标定。
 
-## 现场标定
+## 红色运动目标系统
 
-运行前请根据现场环境调整各项目 `config.py` 中的 LAB 阈值、曝光、UART 参数、到达半径和矩形筛选参数。首次联调时应先断开电机或限制云台输出，确认误差符号和丢失保护后再接入 PID。
+- 默认任务为 A4 巡边。STM32 可用 `TYPE=0x13`、`INDEX=0/1/2` 选择原点复位、屏幕正方形巡边或 A4 巡边。
+- 原点是题面规定的屏幕 0.5 m 正方形中心，由检测到的四角计算，不等同于 A4 中心，也不写死为图像中心。
+- 原点复位生成 1 个航点；屏幕正方形和 A4 边框各生成 20 个顺时针航点。
+- 原点复位使用全帧红点搜索，确保光斑能从屏幕任意位置返回；巡边任务继续使用矩形 ROI 保持帧率。
+- 屏幕任务不把白屏外框与内部方框当作胶带内外沿；它按 `SCREEN_EXPECTED_AREA_RATIO` 选择面积最接近的稳定正方形，该比例必须结合相机取景标定。
+- 优先匹配黑色胶带内外沿，平均对应角点得到中心线，置信级别为 `HIGH`。
+- 连续 15 帧无法配对时，允许最大有效单矩形稳定后退化锁定，置信级别为 `LOW`。
+- 矩形候选会检查面积比例、A4 宽高比、角点抖动和面积变化。
+- 锁定后生成每边 5 个、共 20 个不重复航点；运行期间不重新检测矩形或生成轨迹。
+- 红色光斑连续 3 帧进入当前航点 8 px 半径后切换下一航点；丢失任意一帧会清零稳定计数。
+- 触摸区提供 `REACQUIRE`、`START/RESUME` 和 `PAUSE`，与 STM32 控制帧共用同一状态机。
 
-## UART 帧
+## 绿色自动追踪系统
 
-固定 9 字节帧：
+- 一次 `find_blobs` 同时检测红、绿两个光斑。
+- 误差定义为 `red - green`，图像向右、向下为正。
+- 连续 3 帧进入 12 px 半径后报告追踪成功；越界或任一光斑丢失立即退出。
+- 追踪成功只控制状态提示，不停止误差输出。
+- 丢失帧索引是位掩码：`1` 表示红光丢失，`2` 表示绿光丢失，`3` 表示两者丢失。
+- 上电先等待 `TYPE=0x10`；接收 `TYPE=0x11` 后暂停输出，再次接收 `TYPE=0x10` 后继续。物理开始/暂停键和电机制动仍由绿色系统自己的 STM32 实现。
+
+## UART 协议
+
+固定帧共 9 字节：
 
 ```text
 AA 55 TYPE INDEX DATA0L DATA0H DATA1L DATA1H CHECKSUM
 ```
 
-- `TYPE=01`：当前航点，每 100 ms 重发。
-- `TYPE=02`：视觉误差，供 STM32 PID 使用。
-- `TYPE=03`：红色轨迹完成。
-- `TYPE=04`：光斑丢失。
-- `TYPE=05`：绿色追踪状态。
+`CHECKSUM` 为前 8 字节累加和的低 8 位。坐标使用小端 `uint16`，视觉误差使用小端 `int16`。
+
+| TYPE | 含义 |
+| --- | --- |
+| `01` | 当前航点 |
+| `02` | 视觉误差 |
+| `03` | 当前任务完成 |
+| `04` | 光斑丢失 |
+| `05` | 追踪状态，`DATA0=0/1` |
+| `10` | 开始或继续 |
+| `11` | 暂停 |
+| `12` | 重新识别 |
+| `13` | 选择红色任务，`INDEX=0` 原点、`1` 屏幕正方形、`2` A4 |
+
+STM32 应在 150 ms 没有收到有效控制帧时制动。
+
+## 必须标定
+
+- 红色和绿色 LAB 阈值；
+- 曝光、增益和白平衡；
+- UART 引脚、设备名和波特率；
+- A4 靶纸检测阈值和 ROI 边距；
+- 屏幕正方形检测阈值、像素中心与实际原点；
+- 红色到达半径和绿色追踪成功半径对应的实际厘米数；
+- 两个电机通道的 PID 极性。
+
+## 本地验证
+
+```powershell
+& .\tools\build_maixvision_projects.ps1
+python -m unittest discover -s tests -v
+python -m compileall -q .
+```
+
+设计规格见 `.scratch/dual-vision-apps/PRD.md`，协议和运行状态决策见 `docs/adr/0001-fixed-binary-waypoint-protocol.md`。

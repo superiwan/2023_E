@@ -9,13 +9,26 @@ class GreenTrackerState:
         self.required_stable_frames = stable_frames
         self.status_interval_ms = status_interval_ms
         self.tracked = False
+        self.paused = True
         self.stable_count = 0
         self._last_status_ms = None
+
+    def handle_command(self, command):
+        command = MessageType(command)
+        if command == MessageType.PAUSE:
+            self.paused = True
+            self.tracked = False
+            self.stable_count = 0
+        elif command == MessageType.START_RESUME:
+            self.paused = False
+            self._last_status_ms = None
 
     def _status_due(self, now_ms, changed):
         return changed or self._last_status_ms is None or now_ms - self._last_status_ms >= self.status_interval_ms
 
     def update(self, now_ms, red, green):
+        if self.paused:
+            return []
         messages = []
         previous_tracked = self.tracked
         if red is None or green is None:
